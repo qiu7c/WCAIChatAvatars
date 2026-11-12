@@ -1,0 +1,62 @@
+name: Build WCAIChatAvatars
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.scheme }})
+    runs-on: macos-15
+    env:
+      THEOS: ${{ github.workspace }}/theos
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scheme: rootful
+            make_args: ""
+          - scheme: rootless
+            make_args: "THEOS_PACKAGE_SCHEME=rootless"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Theos
+        run: |
+          brew install ldid
+          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          mkdir -p "$THEOS/sdks"
+          sdk_path=$(xcrun --sdk iphoneos --show-sdk-path)
+          sdk_version=$(xcrun --sdk iphoneos --show-sdk-version)
+          ln -s "$sdk_path" "$THEOS/sdks/iPhoneOS${sdk_version}.sdk"
+
+      - name: Build package
+        run: make clean package FINALPACKAGE=1 ${{ matrix.make_args }}
+
+      - name: Bundle dylib and filter
+        env:
+          PACKAGE_SCHEME: ${{ matrix.scheme }}
+        run: |
+          version=$(sed -n 's/^Version: //p' control)
+          dylib=$(find .theos/_ -type f -name WCAIChatAvatars.dylib -print)
+          test -f "$dylib"
+          filter="$(dirname "$dylib")/WCAIChatAvatars.plist"
+          test -f "$filter"
+          zip -j "packages/WCAIChatAvatars-${version}-${PACKAGE_SCHEME}-dylib.zip" "$dylib" "$filter"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v6
+        with:
+          name: WCAIChatAvatars-${{ matrix.scheme }}
+          path: |
+            packages/*.deb
+            packages/*-dylib.zip
+          if-no-files-found: error
