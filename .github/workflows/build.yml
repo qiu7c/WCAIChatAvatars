@@ -19,9 +19,17 @@ jobs:
       matrix:
         include:
           - scheme: rootful
+            theos_repo: theos/theos
+            deb_arch: iphoneos-arm
             make_args: ""
           - scheme: rootless
+            theos_repo: theos/theos
+            deb_arch: iphoneos-arm64
             make_args: "THEOS_PACKAGE_SCHEME=rootless"
+          - scheme: roothide
+            theos_repo: roothide/theos
+            deb_arch: iphoneos-arm64e
+            make_args: "THEOS_PACKAGE_SCHEME=roothide"
 
     steps:
       - name: Checkout
@@ -30,9 +38,11 @@ jobs:
           persist-credentials: false
 
       - name: Set up Theos
+        env:
+          THEOS_REPOSITORY: ${{ matrix.theos_repo }}
         run: |
           brew install ldid
-          git clone --recursive --depth 1 https://github.com/theos/theos.git "$THEOS"
+          git clone --recursive --depth 1 "https://github.com/${THEOS_REPOSITORY}.git" "$THEOS"
           mkdir -p "$THEOS/sdks"
           sdk_path=$(xcrun --sdk iphoneos --show-sdk-path)
           sdk_version=$(xcrun --sdk iphoneos --show-sdk-version)
@@ -44,7 +54,9 @@ jobs:
       - name: Bundle dylib and filter
         env:
           PACKAGE_SCHEME: ${{ matrix.scheme }}
+          DEB_ARCH: ${{ matrix.deb_arch }}
         run: |
+          grep -Fx "Architecture: ${DEB_ARCH}" .theos/_/DEBIAN/control
           version=$(sed -n 's/^Version: //p' control)
           dylib=$(find .theos/_ -type f -name WCAIChatAvatars.dylib -print)
           test -f "$dylib"

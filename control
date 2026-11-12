@@ -1,7 +1,7 @@
 Package: com.qiu7c.wcaichatavatars
 Name: WCAIChatAvatars
 Depends: mobilesubstrate
-Version: 0.1.0
+Version: 0.1.1
 Architecture: iphoneos-arm
 Description: Show native avatars in WeChat AI assistant conversations.
 Maintainer: qiu7c

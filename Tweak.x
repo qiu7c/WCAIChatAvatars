@@ -59,6 +59,11 @@
 - (void)openChatInfo:(id)sender;
 @end
 
+@interface ContactInfoViewController : UIViewController
+- (instancetype)initWithTitle:(NSString *)title;
+- (void)setM_contact:(CBaseContact *)contact;
+@end
+
 static Class WCAIChatSettingsClass;
 static Class WCAIChatContextClass;
 static Class WCAIChatContactManagerClass;
@@ -68,10 +73,17 @@ static Class WCAIChatControllerClass;
 static Class WCAIChatSelfProfileClass;
 static ptrdiff_t WCAIChatLayoutWidthOffset;
 static char WCAIChatMeasureWidthKey;
+static __thread double WCAIChatMeasuringOutgoingLimit;
 
 static BOOL WCAIChatUsesAvatars(CommonMessageViewModel *model) {
     CBaseContact *chat = model.chatContact;
     return (chat.isWeClawBot || chat.isAIAssistant) && !model.isRecordDetail && !model.isShareConfirm;
+}
+
+static CContactMgr *WCAIChatContactManager(void) {
+    if (!WCAIChatContactManagerClass) return nil;
+    MMContext *context = [WCAIChatContextClass currentContext];
+    return [context getService:WCAIChatContactManagerClass];
 }
 
 static void WCAIChatBindAvatar(CommonMessageCellView *cell) {
@@ -87,9 +99,8 @@ static void WCAIChatBindAvatar(CommonMessageCellView *cell) {
 
     NSString *url = sender ? nil : model.customHeadImageUrl;
     if (!url.length && [contact.m_nsUsrName isEqualToString:name]) url = contact.m_nsHeadImgUrl;
-    if (!url.length && WCAIChatContactManagerClass) {
-        MMContext *context = [WCAIChatContextClass currentContext];
-        CContactMgr *manager = [context getService:WCAIChatContactManagerClass];
+    if (!url.length) {
+        CContactMgr *manager = WCAIChatContactManager();
         CBaseContact *storedContact = sender ? [manager getSelfContact] : [manager getContactByName:name];
         if ([storedContact.m_nsUsrName isEqualToString:name]) url = storedContact.m_nsHeadImgUrl;
     }
@@ -107,9 +118,28 @@ static double WCAIChatRowWidth(CommonMessageViewModel *model) {
 static double WCAIChatTextWidth(CommonMessageViewModel *model, double nativeWidth) {
     if (nativeWidth <= 0 || !WCAIChatUsesAvatars(model)) return nativeWidth;
     // Reserve the 64 pt avatar column, 24 pt bubble padding, and 12 pt opposite margin.
-    NSNumber *measuredWidth = objc_getAssociatedObject(model, &WCAIChatMeasureWidthKey);
-    double rowWidth = measuredWidth ? measuredWidth.doubleValue : WCAIChatRowWidth(model);
+    double rowWidth = WCAIChatRowWidth(model);
     double limit = floor(rowWidth - 64 - 24 - 12);
+    return limit > 0 ? MIN(nativeWidth, limit) : nativeWidth;
+}
+
+static double WCAIChatOutgoingLimit(CommonMessageViewModel *model) {
+    if (!model.isSender || !WCAIChatUsesAvatars(model)) return 0;
+    NSNumber *measured = objc_getAssociatedObject(model, &WCAIChatMeasureWidthKey);
+    double rowWidth = measured ? measured.doubleValue : WCAIChatRowWidth(model);
+    // Match the assistant bubble's roughly 46 pt opposite-side margin in the dump.
+    return MAX(0, floor(rowWidth - 64 - 24 - 47));
+}
+
+static double WCAIChatOutgoingWidth(id delegate, double nativeWidth) {
+    if (nativeWidth <= 0) return nativeWidth;
+    double limit = WCAIChatMeasuringOutgoingLimit;
+    if (limit <= 0) {
+        CommonMessageViewModel *model = nil;
+        if ([delegate isKindOfClass:WCAIChatTextModelClass]) model = delegate;
+        else if ([delegate isKindOfClass:WCAIChatTextCellClass]) model = [(CommonMessageCellView *)delegate viewModel];
+        limit = WCAIChatOutgoingLimit(model);
+    }
     return limit > 0 ? MIN(nativeWidth, limit) : nativeWidth;
 }
 
@@ -143,7 +173,10 @@ static double WCAIChatTextWidth(CommonMessageViewModel *model, double nativeWidt
     if (!chat || navigation.topViewController != chat) return;
 
     if (model.isSender) {
-        UIViewController *profile = [[WCAIChatSelfProfileClass alloc] init];
+        CBaseContact *contact = [WCAIChatContactManager() getSelfContact];
+        if (!contact.m_nsUsrName.length) return;
+        ContactInfoViewController *profile = [[WCAIChatSelfProfileClass alloc] initWithTitle:@"个人资料"];
+        [profile setM_contact:contact];
         if (profile) [navigation pushViewController:profile animated:YES];
     } else {
         [chat openChatInfo:chat.navigationItem.rightBarButtonItem];
@@ -162,28 +195,54 @@ static double WCAIChatTextWidth(CommonMessageViewModel *model, double nativeWidt
 }
 - (double)labelWidth {
     double nativeWidth = %orig;
-    return WCAIChatTextWidth((CommonMessageViewModel *)self, nativeWidth);
+    return WCAIChatOutgoingWidth(self, nativeWidth);
 }
 - (id)getRichTextViewConfig {
     RichTextViewConfig *config = %orig;
-    CommonMessageViewModel *model = (CommonMessageViewModel *)self;
-    if (model.isSender) {
-        double width = config.fWidth;
-        double limited = WCAIChatTextWidth(model, width);
-        if (limited < width) config.fWidth = limited;
-    }
+    double width = config.fWidth;
+    double limited = WCAIChatOutgoingWidth(self, width);
+    if (limited < width) config.fWidth = limited;
     return config;
+}
+- (CGSize)calculateContentTextSize {
+    double previous = WCAIChatMeasuringOutgoingLimit;
+    WCAIChatMeasuringOutgoingLimit = WCAIChatOutgoingLimit((CommonMessageViewModel *)self);
+    CGSize measured = %orig;
+    WCAIChatMeasuringOutgoingLimit = previous;
+    return measured;
+}
+- (CGSize)sizeForContent:(id)content layoutDelegate:(id)delegate autoLineSpacing:(BOOL)autoSpacing outArrStyles:(id __autoreleasing *)styles {
+    double previous = WCAIChatMeasuringOutgoingLimit;
+    double limit = WCAIChatOutgoingLimit((CommonMessageViewModel *)self);
+    if (limit > 0) WCAIChatMeasuringOutgoingLimit = limit;
+    CGSize measured = %orig(content, delegate, autoSpacing, styles);
+    WCAIChatMeasuringOutgoingLimit = previous;
+    return measured;
 }
 %end
 
 %hook RichTextViewConfig
 - (double)fWidth {
     double nativeWidth = %orig;
-    id delegate = self.layoutDelegate;
-    CommonMessageViewModel *model = nil;
-    if ([delegate isKindOfClass:WCAIChatTextModelClass]) model = delegate;
-    else if ([delegate isKindOfClass:WCAIChatTextCellClass]) model = [(CommonMessageCellView *)delegate viewModel];
-    return model.isSender ? WCAIChatTextWidth(model, nativeWidth) : nativeWidth;
+    return WCAIChatOutgoingWidth(self.layoutDelegate, nativeWidth);
+}
+%end
+
+%hook RichTextView
++ (CGSize)sizeForContent:(id)content font:(id)font width:(double)width parserType:(unsigned long long)parser delegate:(id)delegate outArrStyles:(id __autoreleasing *)styles {
+    double limited = WCAIChatOutgoingWidth(delegate, width);
+    CGSize measured = %orig(content, font, limited, parser, delegate, styles);
+    return measured;
+}
++ (CGSize)sizeForContent:(id)content font:(id)font width:(double)width lineSpacing:(double)spacing lineNumber:(unsigned long long)lines parserType:(unsigned long long)parser delegate:(id)delegate outArrStyles:(id __autoreleasing *)styles rightIconPadding:(double)padding originX:(double)x textAttribute:(id)attributes expandAndCollapseObj:(id)expand imageLayout:(id)images {
+    double limited = WCAIChatOutgoingWidth(delegate, width);
+    CGSize measured = %orig(content, font, limited, spacing, lines, parser, delegate, styles, padding, x, attributes, expand, images);
+    return measured;
+}
++ (CGSize)sizeForPrefixContent:(id)prefix TargetContent:(id)content TargetParserString:(id)parsed SuffixContent:(id)suffix font:(id)font width:(double)width lineSpacing:(double)spacing lineNumber:(unsigned long long)lines linkTextVisiableLength:(unsigned int)linkLength parserType:(unsigned long long)parser delegate:(id)delegate outArrStyles:(id __autoreleasing *)styles {
+    double limited = WCAIChatOutgoingWidth(delegate, width);
+    CGSize measured = %orig(prefix, content, parsed, suffix, font, limited, spacing, lines, linkLength, parser, delegate, styles);
+    return measured;
 }
 %end
 
@@ -226,7 +285,9 @@ static double WCAIChatTextWidth(CommonMessageViewModel *model, double nativeWidt
     WCAIChatTextCellClass = NSClassFromString(@"TextMessageCellView");
     Class chatController = NSClassFromString(@"BaseMsgContentViewController");
     if ([chatController instancesRespondToSelector:@selector(openChatInfo:)]) WCAIChatControllerClass = chatController;
-    WCAIChatSelfProfileClass = NSClassFromString(@"SettingMyProfileViewController");
+    Class profile = NSClassFromString(@"ContactInfoViewController");
+    if ([profile instancesRespondToSelector:@selector(initWithTitle:)] &&
+        [profile instancesRespondToSelector:@selector(setM_contact:)]) WCAIChatSelfProfileClass = profile;
     Class context = NSClassFromString(@"MMContext");
     Class contactManager = NSClassFromString(@"CContactMgr");
     if ([context respondsToSelector:@selector(currentContext)] &&
